@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Snappy Study API - Lambda + API Gateway (eu-central-1)
+
+Parameters:
+  OpenAIApiKey:
+    Type: String
+    NoEcho: true
+    Description: OpenAI API key for the image analysis Lambda
+  ArtifactBucket:
+    Type: String
+    Description: S3 bucket that stores Lambda deployment artifacts
+  ArtifactKey:
+    Type: String
+    Description: S3 key (object path) for the Lambda zip file
+  SentryDsn:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Sentry DSN for error tracking (leave empty to disable)
+  ApiKey:
+    Type: String
+    NoEcho: true
+    Description: Secret key clients must send in the x-api-key header
+
+Resources:
+  SnappyStudyApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: snappy-study-api
+      Handler: lambda-index.handler
+      Runtime: nodejs22.x
+      Timeout: 60
+      MemorySize: 512
+      Role: !GetAtt SnappyStudyApiRole.Arn
+      Layers:
+        - arn:aws:lambda:eu-central-1:943013980633:layer:SentryNodeServerlessSDKv10:63
+      Environment:
+        Variables:
+          OPENAI_API_KEY: !Ref OpenAIApiKey
+          SENTRY_DSN: !Ref SentryDsn
+          NODE_OPTIONS: '--import @sentry/aws-serverless/awslambda-auto'
+          API_KEY: !Ref ApiKey
+      Code:
+        S3Bucket: !Ref ArtifactBucket
+        S3Key: !Ref ArtifactKey
+
+  SnappyStudyApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: snappy-study-api-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  SnappyStudyApiGateway:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: snappy-study-http-api
+      ProtocolType: HTTP
+
+  SnappyStudyApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref SnappyStudyApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SnappyStudyApiFunction.Arn}/invocations
+      PayloadFormatVersion: '2.0'
+
+  SnappyStudyApiRouteHealth:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SnappyStudyApiGateway
+      RouteKey: GET /health
+      Target: !Sub integrations/${SnappyStudyApiIntegration}
+
+  SnappyStudyApiRouteAnalyze:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SnappyStudyApiGateway
+      RouteKey: POST /analyze-image
+      Target: !Sub integrations/${SnappyStudyApiIntegration}
+
+  SnappyStudyApiRouteTts:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref SnappyStudyApiGateway
+      RouteKey: POST /tts
+      Target: !Sub integrations/${SnappyStudyApiIntegration}
+
+  SnappyStudyApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref SnappyStudyApiGateway
+      StageName: prod
+      AutoDeploy: true
+      DefaultRouteSettings:
+        # 5 requests/second sustained, burst up to 10
+        ThrottlingRateLimit: 5
+        ThrottlingBurstLimit: 10
+
+  SnappyStudyApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SnappyStudyApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${SnappyStudyApiGateway}/*/*/*
+
+Outputs:
+  ApiEndpoint:
+    Description: HTTPS endpoint for the Snappy Study API
+    Value: !Sub https://${SnappyStudyApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod
